@@ -15,3 +15,12 @@ app-private-key.pem
 # 编译产物 / 可直接双击运行的部署目录（含 .env 与私钥）
 dist/
 dist-app/
+
+# 凭证分发链接的剪贴板/调试产物（含 ghs_ 令牌分发地址，切勿提交）
+clip-check.txt
+*.clip.txt
+ghtoken_*
+tmp/
+
+# Agent 工作记忆（含内部仓库名、账号、自建服务细节，不公开）
+.workbuddy-ai/

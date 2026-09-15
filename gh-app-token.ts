@@ -23,6 +23,22 @@
 //   因此本工具输出的是预先 base64 好的 Basic 头值。
 //   参考：https://github.blog/changelog/2026-05-15-github-app-installation-tokens-per-request-override-header/
 //
+// ── 网络命令（TextDB 文本托管）────────────────────────────────────────────────
+//   除本地输出外，还会把凭证打包 POST 到 TextDB（默认 https://text.hunluan.space/）
+//   换取一个公开可读的短地址，于是「配置」就变成一条可以直接扔给任何机器的
+//   网络命令：
+//
+//     curl -s <URL> | bash
+//
+//   TextDB 接口（已实测，见 https://text.hunluan.space/openapi.json）：
+//     POST /update/   body: {key, value, password?}  -> {status:1, data:{key,url}}
+//     GET  /{key}                                      -> text/plain 原文
+//     DELETE /{key}
+//   Key 规则：仅 [0-9a-zA-Z_]，1~512 字符；Value 上限 5 MiB。
+//   读取无需密码，所以「读取本身」就是分发渠道；password 只防别人覆盖/删除。
+//
+//   默认剪贴板内容 = 网络命令（可直接粘贴执行），本地完整配置仍会打印在控制台。
+//
 // 依赖：bun（无需其他包）
 // 配置：同级 .env
 // =============================================================================
@@ -55,12 +71,18 @@ const YELLOW = (s: string) => paint("1;33", s);
 const CYAN = (s: string) => paint("0;36", s);
 const DIM = (s: string) => paint("2", s);
 
-const info = (s: string) => console.log(`${GREEN("[INFO]")}  ${s}`);
-const warn = (s: string) => console.log(`${YELLOW("[WARN]")}  ${s}`);
+// --json 模式下 stdout 必须是纯 JSON（会被 jq / JSON.parse 消费），
+// 因此所有进度与提示信息一律改走 stderr。
+const JSON_MODE = process.argv.includes("--json");
+const note = (s: string) => (JSON_MODE ? console.error(s) : console.log(s));
+
+const info = (s: string) => note(`${GREEN("[INFO]")}  ${s}`);
+const warn = (s: string) => note(`${YELLOW("[WARN]")}  ${s}`);
 const error = (s: string) => console.error(`${RED("[ERROR]")} ${s}`);
-const label = (s: string) => console.log(CYAN(s));
+const label = (s: string) => note(CYAN(s));
 
 function section(t: string) {
+  if (JSON_MODE) return;
   console.log("");
   console.log(DIM("─".repeat(60)));
   label(`  ${t}`);
@@ -98,6 +120,40 @@ interface Config {
   permissions: Record<string, string> | null;
 }
 
+/**
+ * GitHub 的「创建安装令牌」接口里 `repositories` 只接受**裸仓库名**
+ * （如 `my-repo`），不接受 `owner/my-repo`。实测：
+ *   {"repositories":["textdb-edgeone"]}            -> 201 ✅
+ *   {"repositories":["sixiang-world/textdb-edgeone"]} -> 422 ❌
+ *     "There is at least one repository that does not exist or is not
+ *      accessible to the parent installation."
+ * 但 `owner/repo` 形式对人类更直观（也用于拼 clone URL），
+ * 所以这里统一归一化：请求体用裸名，展示和拼 URL 用完整名。
+ */
+function splitRepo(full: string): { owner: string; name: string; full: string } {
+  const i = full.indexOf("/");
+  if (i < 0) return { owner: "", name: full, full };
+  return { owner: full.slice(0, i), name: full.slice(i + 1), full };
+}
+
+/**
+ * TextDB 文本托管服务配置。
+ *
+ * 设计意图：把 1 小时有效的凭证变成「一条网络命令」。
+ * 任何机器（CI、远程服务器、别人的电脑）只要能访问这个地址，就能拿到凭证，
+ * 不需要传输 .env / .pem，也不需要手动复制粘贴一大段配置。
+ */
+interface NetConfig {
+  /** 服务根地址，如 https://text.hunluan.space */
+  baseUrl: string;
+  /** 写入用的 key（留空则按时间戳自动生成） */
+  key: string;
+  /** 可选密码：读取不需要，仅防止别人覆盖/删除这条记录 */
+  password: string;
+  /** 是否启用网络发布 */
+  enabled: boolean;
+}
+
 function loadConfig(): Config {
   const e = parseEnvFile(ENV_FILE);
   const g = (k: string) => process.env[k] || e[k] || "";
@@ -117,6 +173,20 @@ function loadConfig(): Config {
       .map((s) => s.trim())
       .filter(Boolean),
     permissions: null,
+  };
+}
+
+const DEFAULT_NET_BASE = "https://text.hunluan.space";
+
+function loadNetConfig(): NetConfig {
+  const e = parseEnvFile(ENV_FILE);
+  const g = (k: string) => process.env[k] || e[k] || "";
+  const enabledRaw = (g("NET_ENABLED") || "1").trim().toLowerCase();
+  return {
+    baseUrl: (g("NET_BASE_URL") || DEFAULT_NET_BASE).replace(/\/+$/, ""),
+    key: g("NET_KEY").trim(),
+    password: g("NET_PASSWORD").trim(),
+    enabled: !["0", "false", "no", "off"].includes(enabledRaw),
   };
 }
 
@@ -153,6 +223,29 @@ function createEnvTemplate() {
     "",
     "# 可选：限制 token 只能访问这些仓库（逗号分隔，留空=安装范围内全部）",
     "TARGET_REPOS=",
+    "",
+    "# ============================================================",
+    "# 网络命令（把凭证发布到文本托管服务，换一条可粘贴的网络命令）",
+    "#",
+    "# 发布后你会得到形如 https://text.hunluan.space/<key> 的地址，",
+    "# 任何机器执行  curl -s <地址> | bash  即可直接拿到凭证。",
+    "#",
+    "# 安全性说明：该地址是「公开可读」的（读取无需密码），",
+    "# 但凭证本身 1 小时后由 GitHub 自动失效，风险窗口很小。",
+    "# 若要防止别人覆盖/删除这条记录，可设置 NET_PASSWORD。",
+    "# ============================================================",
+    "",
+    "# 是否启用网络发布（1=启用，0=只用本地输出）",
+    "NET_ENABLED=1",
+    "",
+    "# 服务地址（默认 text.hunluan.space，自己的服务可改）",
+    "NET_BASE_URL=https://text.hunluan.space",
+    "",
+    "# 写入用的 key，仅允许字母/数字/下划线；留空则按时间戳自动生成",
+    "NET_KEY=",
+    "",
+    "# 可选：保护密码（读取不需要密码，仅防止别人覆盖/删除）",
+    "NET_PASSWORD=",
     "",
   ].join("\r\n");
   writeFileSync(ENV_FILE, tpl, "utf8");
@@ -214,7 +307,8 @@ async function fetchInstallationToken(
   jwt: string,
 ): Promise<Iat> {
   const body: Record<string, unknown> = {};
-  if (cfg.repos.length) body.repositories = cfg.repos;
+  // ⚠️ 必须去掉 owner 前缀，只传裸仓库名，否则 422（见 splitRepo 注释）
+  if (cfg.repos.length) body.repositories = cfg.repos.map((r) => splitRepo(r).name);
   if (cfg.permissions) body.permissions = cfg.permissions;
 
   info(`正在向 GitHub 申请安装访问令牌（Installation ${cfg.installationId}）...`);
@@ -256,6 +350,10 @@ async function fetchInstallationToken(
     } else if (res.status === 404) {
       warn("Installation 不存在。请检查 INSTALLATION_ID 是否正确，");
       warn("以及这个 App 是否真的安装到了目标账号/仓库上。");
+    } else if (res.status === 422 || msg.includes("not accessible")) {
+      warn("TARGET_REPOS 里有仓库不在这个 App 的安装范围内。");
+      warn("请到 GitHub App 设置页把它加入安装范围，或把该仓库从 TARGET_REPOS 移除。");
+      warn("（本工具已自动去掉 owner/ 前缀；若你填的是 owner/repo，这不是原因）");
     } else if (msg.includes("expired")) {
       warn("JWT 已过期，请检查本机系统时间");
     }
@@ -438,6 +536,300 @@ function buildOutput(args: {
   return L.join("\n");
 }
 
+// ── 网络命令：把凭证发布到文本托管，换一条可直接粘贴的命令 ───────────────────
+/**
+ * 生成随机 key。规则来自服务端：仅允许 [0-9a-zA-Z_]，长度 1~512。
+ * 前缀固定的好处：一眼能认出这是本工具发布的临时凭证，方便事后批量清理。
+ */
+function makeNetKey(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(
+    d.getHours(),
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `ghtoken_${stamp}_${rand}`;
+}
+
+interface NetPublishResult {
+  ok: boolean;
+  url: string;
+  key: string;
+  error?: string;
+}
+
+/**
+ * 把一段 shell 脚本发布到 TextDB，返回可公开读取的 URL。
+ *
+ * 接口（已实测）：
+ *   POST {base}/update/   {"key":..,"value":..,"password":..}
+ *     -> {"status":1,"data":{"key":"..","url":".."}}
+ * 注意：返回的 url 由服务端给出，优先采用；只有拿不到时才本地拼。
+ */
+async function publishToNet(
+  net: NetConfig,
+  value: string,
+): Promise<NetPublishResult> {
+  const key = net.key || makeNetKey();
+  const endpoint = `${net.baseUrl}/update/`;
+
+  const body: Record<string, string> = { key, value };
+  if (net.password) body.password = net.password;
+
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "gh-app-token",
+      },
+      body: JSON.stringify(body),
+    });
+
+    const raw = await res.text();
+    let data: any = null;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      /* 非 JSON 响应，下面按失败处理并回显原文 */
+    }
+
+    if (!res.ok || !data || data.status !== 1) {
+      return {
+        ok: false,
+        key,
+        url: "",
+        error: data?.error || `HTTP ${res.status}: ${raw.slice(0, 200)}`,
+      };
+    }
+
+    return {
+      ok: true,
+      key: data?.data?.key || key,
+      url: data?.data?.url || `${net.baseUrl}/${key}`,
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      key,
+      url: "",
+      error: e?.message ?? String(e),
+    };
+  }
+}
+
+/**
+ * 生成「网络命令」要发布的 shell 脚本。
+ *
+ * 这个脚本会被  curl -s <url> | bash  直接执行，所以必须自包含：
+ *   1. 把 base64 的 Basic 凭证导出成环境变量
+ *   2. 立刻用 ls-remote 验证凭证有效（失败就早退，不让后续命令默默 401）
+ *   3. 打印携带 -c 的 git 命令模板，用户复制即可用
+ *
+ * 刻意不在这里自动 clone/push —— 脚本只做「装填子弹」，
+ * 具体对哪个仓库做什么操作，交给人或 Agent 决定。
+ */
+function buildNetScript(args: {
+  basic: string;
+  rawToken: string;
+  expiresAt: string;
+  appSlug: string;
+  botId: string | null;
+  repos: string[];
+}): string {
+  const { basic, rawToken, expiresAt, appSlug, botId, repos } = args;
+  const firstRepo = repos.length ? repos[0] : "<owner>/<repo>";
+  const botName = appSlug ? `${appSlug}[bot]` : "";
+  const botEmail =
+    appSlug && botId
+      ? `${botId}+${appSlug}[bot]@users.noreply.github.com`
+      : "";
+
+  const idArgs = botName
+    ? ` -c user.name="${botName}" -c user.email="${botEmail}"`
+    : "";
+
+  const L: string[] = [];
+  L.push("#!/usr/bin/env bash");
+  L.push("# ============================================================");
+  L.push("# GitHub App 短期访问凭证 —— 网络命令");
+  L.push("#");
+  L.push("# 本脚本由 gh-app-token 自动生成并托管，可直接执行：");
+  L.push("#   curl -s <本文件地址> | bash");
+  L.push("#");
+  L.push("# 执行后效果：");
+  L.push("#   1. 校验凭证是否仍然有效（过期会立刻提示）");
+  L.push("#   2. 打印可直接使用的 git 命令模板");
+  L.push("#");
+  L.push(`# 过期时间(UTC) : ${expiresAt}`);
+  L.push(`# 过期时间(本地): ${formatLocal(expiresAt)}`);
+  L.push("# 有效期        : 1 小时（GitHub 强制，不可配置）");
+  L.push("# ============================================================");
+  L.push("");
+  L.push("set -u");
+  L.push("");
+  L.push("# ── 1. 装填凭证 ──────────────────────────────────────────");
+  L.push("# 这里的值是 base64( x-access-token:<原始令牌> )，可直接塞进 Basic 头。");
+  L.push("# ⚠️ 新版 ghs_ 令牌只认 Basic 认证，用 Bearer 会被拒（401）。");
+  L.push(`export GH_TEMP_TOKEN="${basic}"`);
+  L.push("");
+
+  if (botName) {
+    L.push("# bot 提交身份（可选）");
+    L.push(`export GH_BOT_NAME="${botName}"`);
+    L.push(`export GH_BOT_EMAIL="${botEmail}"`);
+    L.push("");
+  }
+
+  L.push("# ── 2. 校验凭证 ──────────────────────────────────────────");
+  L.push(`_REPO="${firstRepo}"`);
+  L.push('if [ "$_REPO" = "<owner>/<repo>" ]; then');
+  L.push('  echo "⚠️  未在配置里指定仓库，跳过连通性校验。"');
+  L.push("else");
+  L.push('  echo "正在校验凭证..."');
+  L.push("  _ERR=$(git -c http.extraHeader=\"Authorization: Basic $GH_TEMP_TOKEN\" \\");
+  L.push(`      ls-remote "https://github.com/$_REPO.git" HEAD 2>&1 >/dev/null)`);
+  L.push("  if [ $? -eq 0 ]; then");
+  L.push('    echo "✅ 凭证有效，可用仓库: $_REPO"');
+  L.push("  else");
+  L.push("    # 区分「凭证过期」和「网络不通」——两者的处理方式完全不同，");
+  L.push("    # 报错信息必须让人一眼看出该重新生成还是该查网络。");
+  L.push('    case "$_ERR" in');
+  L.push("      *\"could not read Username\"*|*\"Authentication failed\"*|*401*)");
+  L.push('        echo "❌ 凭证无效或已过期。请重新运行 gh-app-token 生成。"');
+  L.push("        exit 1 ;;");
+  L.push("      *)");
+  L.push('        echo "⚠️  无法连接 GitHub，跳过校验（这不代表凭证有问题）。"');
+  L.push('        echo "    网络错误: $(echo "$_ERR" | head -1)"');
+  L.push('        echo "    凭证是否有效以实际 git 命令结果为准。" ;;');
+  L.push("    esac");
+  L.push("  fi");
+  L.push("fi");
+  L.push("");
+  L.push("# ── 3. 可用命令 ──────────────────────────────────────────");
+  L.push("# 关键：-c 必须写在 clone/pull/push 之前！");
+  L.push('#   git -c http.extraHeader=... clone  -> 仅本次生效，不落盘  ✅');
+  L.push('#   git clone -c http.extraHeader=...   -> 令牌被写进 .git/config ❌');
+  L.push('_GIT="git -c http.extraHeader=Authorization: Basic $GH_TEMP_TOKEN' + idArgs + '"');
+  L.push("");
+  L.push('echo ""');
+  L.push('echo "可用命令："');
+  L.push(`echo "  $_GIT clone https://github.com/${firstRepo}.git"`);
+  L.push('echo "  $_GIT pull"');
+  L.push('echo "  $_GIT push"');
+  L.push("");
+  L.push("# 直接执行任意 git 命令也可以，例如：");
+  L.push(`#   git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN"${idArgs} clone https://github.com/${firstRepo}.git`);
+  L.push("");
+  L.push("# 原始令牌（需要走 REST API 时用，注意别打印到日志）：");
+  L.push(`#   ${rawToken.slice(0, 24)}...（完整值见本地配置）`);
+  L.push("");
+  L.push("# 清理（可选）：");
+  L.push("#   unset GH_TEMP_TOKEN");
+  return L.join("\n");
+}
+
+/**
+ * 生成给 AI Agent 的提示词。
+ *
+ * 目标是让 Agent 读完就能自己完成「取凭证 → 用凭证」的全过程，
+ * 不需要人去解释 Basic/Bearer 的区别或 -c 的位置坑。
+ */
+function buildAgentPrompt(args: {
+  netUrl: string;
+  expiresAt: string;
+  appSlug: string;
+  botId: string | null;
+  repos: string[];
+}): string {
+  const { netUrl, expiresAt, appSlug, botId, repos } = args;
+  const firstRepo = repos.length ? repos[0] : "<owner>/<repo>";
+  const botName = appSlug ? `${appSlug}[bot]` : "";
+
+  const L: string[] = [];
+  L.push("你是执行 GitHub 操作的助手。按以下步骤获取临时凭证并完成 git 操作。");
+  L.push("");
+  L.push("## 凭证来源");
+  L.push("");
+  L.push("执行这条命令取回凭证（它是 base64 后的 Basic 认证值）：");
+  L.push("");
+  L.push("```bash");
+  L.push(`export GH_TEMP_TOKEN=$(curl -s ${netUrl} | grep -oP '(?<=GH_TEMP_TOKEN=")[^"]+')`);
+  L.push("```");
+  L.push("");
+  L.push("如果上面取不到，直接拉全文自行解析：");
+  L.push("");
+  L.push("```bash");
+  L.push(`curl -s ${netUrl}`);
+  L.push("```");
+  L.push("");
+  L.push("## 硬约束（非常重要，违反会失败）");
+  L.push("");
+  L.push("1. **必须用 Basic，不能用 Bearer。** 新版 `ghs_` 令牌只接受 HTTP Basic 认证，");
+  L.push("   用 `Authorization: Bearer <token>` 会返回 401 或提示输入用户名。");
+  L.push("   正确写法：`Authorization: Basic $GH_TEMP_TOKEN`");
+  L.push("");
+  L.push("2. **`-c` 必须放在子命令之前。** 位置错了令牌会落盘到 `.git/config`，属于安全事故：");
+  L.push("");
+  L.push("   ```bash");
+  L.push("   git -c http.extraHeader=... clone <url>   # ✅ 仅本次命令生效");
+  L.push("   git clone -c http.extraHeader=... <url>   # ❌ 令牌写进 .git/config");
+  L.push("   ```");
+  L.push("");
+  L.push("3. **不要改本机的全局 git 配置。** 不要执行 `git config --global`，");
+  L.push("   不要设置 credential.helper，不要用 `https://x-access-token:TOKEN@github.com/...`");
+  L.push("   这种把令牌写进 remote URL 的写法。用完即弃。");
+  L.push("");
+  L.push("4. **不要打印或提交令牌。** 不要把 `$GH_TEMP_TOKEN` 或 `ghs_` 开头的原文");
+  L.push("   写进任何文件、日志、commit、issue 或 PR 描述。");
+  L.push("");
+  L.push("## 凭证寿命");
+  L.push("");
+  L.push("- 有效期 **1 小时**，由 GitHub 服务端强制过期，无法延长。");
+  L.push(`- 本次过期时间：${expiresAt}（本地 ${formatLocal(expiresAt)}）`);
+  L.push("- 如果返回 401，说明已过期 —— 让用户重新运行 `gh-app-token` 生成，不要重试。");
+  L.push("");
+  L.push("## 可用范围");
+  L.push("");
+  if (repos.length) {
+    L.push(`仅限这些仓库：${repos.join(", ")}`);
+  } else {
+    L.push("安装范围内全部仓库（未在配置里限定）。");
+  }
+  L.push(`典型仓库：${firstRepo}`);
+  L.push("");
+  L.push("## 操作模板");
+  L.push("");
+  L.push("```bash");
+  L.push(`git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" clone https://github.com/${firstRepo}.git`);
+  L.push("```");
+  L.push("");
+  L.push("在已有仓库里执行 pull / push / status 等，同样把 `-c` 放在子命令前：");
+  L.push("");
+  L.push("```bash");
+  L.push('git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" pull');
+  L.push('git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" push');
+  L.push("```");
+  L.push("");
+  if (botName) {
+    L.push("## 提交身份");
+    L.push("");
+    L.push("若希望提交显示为 App 机器人而非用户本人，加上：");
+    L.push("");
+    L.push("```bash");
+    L.push(`-c user.name="${botName}" \\`);
+    L.push("  " + `-c user.email="${botId}+${appSlug}[bot]@users.noreply.github.com"`);
+    L.push("```");
+    L.push("");
+  }
+  L.push("## 完成后");
+  L.push("");
+  L.push("```bash");
+  L.push("unset GH_TEMP_TOKEN");
+  L.push("```");
+  return L.join("\n");
+}
+
 // ── 等待按键 ─────────────────────────────────────────────────────────────────
 function pauseIfNeeded() {
   if (!process.stdout.isTTY || !process.stdin.isTTY || process.env.GTT_NO_PAUSE) return;
@@ -466,7 +858,8 @@ function printHelp() {
   console.log(`
 ${CYAN("gh-app-token")} — GitHub App 短期凭证签发工具
 
-用 GitHub App 私钥换取 1 小时有效的安装访问令牌，输出零残留的 git 命令。
+用 GitHub App 私钥换取 1 小时有效的安装访问令牌。
+输出四块内容：配置信息 / 网络命令地址 / 可复制命令 / Agent 提示词。
 本程序不修改你本机的任何 git 配置。
 
 用法:
@@ -475,12 +868,28 @@ ${CYAN("gh-app-token")} — GitHub App 短期凭证签发工具
 选项:
   --json            以 JSON 输出
   --no-clipboard    不写剪贴板
-  --check           仅校验配置（私钥、App 信息），不申请令牌
+  --no-net          不发布到网络（只用本地输出）
+  --check           仅校验配置（私钥、App 信息、网络设置），不申请令牌
   --help            显示帮助
 
 配置文件:
   ${ENV_FILE}
-  需要 APP_ID / INSTALLATION_ID / APP_PRIVATE_KEY_PATH
+  必需: APP_ID / INSTALLATION_ID / APP_PRIVATE_KEY_PATH
+  可选: APP_SLUG / TARGET_REPOS / NET_* （见下方）
+
+网络命令:
+  默认会把凭证发布到文本托管服务，换一条可直接粘贴的命令：
+
+      curl -s <地址> | bash
+
+  文本托管服务地址（默认 ${DEFAULT_NET_BASE}）：
+    ${DEFAULT_NET_BASE}    自建服务，匿名读写
+
+  相关配置项:
+    NET_ENABLED     1=启用（默认），0=只用本地
+    NET_BASE_URL    服务地址
+    NET_KEY         写入用的 key，留空自动生成
+    NET_PASSWORD    可选，仅防别人覆盖/删除（读取不需要密码）
 
 为什么是 GitHub App:
   GitHub 未提供创建 PAT 的 API（POST /user/tokens 实测 404）。
@@ -494,6 +903,7 @@ async function main() {
   const flags = {
     json: argv.includes("--json"),
     noClipboard: argv.includes("--no-clipboard"),
+    noNet: argv.includes("--no-net"),
     check: argv.includes("--check"),
     help: argv.includes("--help") || argv.includes("-h"),
   };
@@ -563,12 +973,18 @@ async function main() {
   info("私钥自检通过 ✓");
 
   if (flags.check) {
+    const netCfg = loadNetConfig();
     section("配置校验");
     console.log(`  App ID          : ${cfg.appId}`);
     console.log(`  Installation ID : ${cfg.installationId}`);
     console.log(`  私钥            : ${cfg.privateKeyPath}`);
     console.log(`  App slug        : ${cfg.appSlug || "(未设置，将跳过 bot 身份)"}`);
     console.log(`  限定仓库        : ${cfg.repos.length ? cfg.repos.join(", ") : "(安装范围内全部)"}`);
+    console.log(`  网络发布        : ${netCfg.enabled ? netCfg.baseUrl : "(已禁用)"}`);
+    if (netCfg.enabled) {
+      console.log(`  发布 key        : ${netCfg.key || "(自动生成)"}`);
+      console.log(`  记录密码        : ${netCfg.password ? "已设置" : "(无，任何人可覆盖该记录)"}`);
+    }
     console.log("");
     info("配置看起来正常。去掉 --check 即可正式申请令牌。");
     pauseIfNeeded();
@@ -585,8 +1001,43 @@ async function main() {
     warn(`未能查到 bot 用户 "${cfg.appSlug}[bot]"，将跳过提交身份信息`);
   }
 
+  const basic = Buffer.from(`x-access-token:${iat.token}`, "utf8").toString(
+    "base64",
+  );
+
   const text = buildOutput({
     token: iat.token,
+    expiresAt: iat.expiresAt,
+    appSlug: cfg.appSlug,
+    botId,
+    repos: cfg.repos,
+  });
+
+  const net = loadNetConfig();
+
+  // ── 网络发布：把凭证变成一条可粘贴的命令 ──────────────────────────────────
+  let netResult: NetPublishResult | null = null;
+  if (net.enabled && !flags.noNet) {
+    const script = buildNetScript({
+      basic,
+      rawToken: iat.token,
+      expiresAt: iat.expiresAt,
+      appSlug: cfg.appSlug,
+      botId,
+      repos: cfg.repos,
+    });
+    info(`正在发布到 ${net.baseUrl} ...`);
+    netResult = await publishToNet(net, script);
+    if (!netResult.ok) {
+      warn(`网络发布失败：${netResult.error}`);
+      warn("已跳过网络命令，本地配置仍然可用。");
+    }
+  }
+
+  const netUrl = netResult?.ok ? netResult.url : "";
+
+  const agentPrompt = buildAgentPrompt({
+    netUrl: netUrl || "<网络命令地址（发布成功后才有）>",
     expiresAt: iat.expiresAt,
     appSlug: cfg.appSlug,
     botId,
@@ -599,7 +1050,7 @@ async function main() {
         {
           token: iat.token,
           // 新版 ghs_ 令牌只认 Basic 认证，这里直接给出可直接用的头值
-          authorization_header: `Basic ${Buffer.from(`x-access-token:${iat.token}`, "utf8").toString("base64")}`,
+          authorization_header: `Basic ${basic}`,
           expires_at: iat.expiresAt,
           expires_at_local: formatLocal(iat.expiresAt),
           token_type: "installation_access_token",
@@ -612,6 +1063,19 @@ async function main() {
             cfg.appSlug && botId
               ? `${botId}+${cfg.appSlug}[bot]@users.noreply.github.com`
               : null,
+          network: netResult
+            ? {
+                ok: netResult.ok,
+                key: netResult.key,
+                url: netResult.url || null,
+                // 可直接复制粘贴的一条命令
+                command: netResult.ok
+                  ? `curl -s ${netResult.url} | bash`
+                  : null,
+                error: netResult.error ?? null,
+              }
+            : { enabled: false, reason: flags.noNet ? "--no-net" : "NET_ENABLED=0" },
+          agent_prompt: agentPrompt,
         },
         null,
         2,
@@ -620,7 +1084,9 @@ async function main() {
     return;
   }
 
-  const copied = flags.noClipboard ? false : copyToClipboard(text);
+  // 默认复制「网络命令」；发布失败则退回复制本地完整配置
+  const clipText = netUrl ? `curl -s ${netUrl} | bash` : text;
+  const copied = flags.noClipboard ? false : copyToClipboard(clipText);
 
   section("签发成功");
   console.log(`  令牌前缀      : ${iat.token.slice(0, 12)}...`);
@@ -631,12 +1097,55 @@ async function main() {
   if (cfg.appSlug && botId) {
     console.log(`  Bot 身份      : ${cfg.appSlug}[bot]`);
   }
-  console.log("");
-  if (copied) info("完整配置已复制到剪贴板");
-  else warn("剪贴板写入失败，请手动复制下方内容");
 
-  section("配置信息（可直接复制）");
+  // ── 1. 配置信息 ───────────────────────────────────────────────────────────
+  section("1. 配置信息");
   console.log(text);
+
+  // ── 2. 网络命令地址 ───────────────────────────────────────────────────────
+  section("2. 网络命令地址");
+  if (netUrl) {
+    console.log(`  ${netUrl}`);
+    console.log("");
+    console.log(DIM(`  公开可读，${formatLocal(iat.expiresAt)} 前有效`));
+    if (net.password) {
+      console.log(DIM("  已设保护密码：别人无法覆盖/删除这条记录"));
+    } else {
+      console.log(DIM("  未设保护密码：任何人可覆盖这条记录（可设 NET_PASSWORD 防护）"));
+    }
+  } else if (flags.noNet) {
+    console.log(DIM("  已跳过（--no-net）"));
+  } else if (!net.enabled) {
+    console.log(DIM("  已禁用（NET_ENABLED=0）"));
+  } else {
+    console.log(DIM(`  发布失败${netResult?.error ? `：${netResult.error}` : ""}`));
+  }
+
+  // ── 3. 命令复制粘贴 ───────────────────────────────────────────────────────
+  section("3. 命令复制粘贴");
+  if (netUrl) {
+    console.log(CYAN(`curl -s ${netUrl} | bash`));
+    console.log("");
+    console.log(DIM("  在任何机器上执行这一条即可拿到凭证并校验有效性。"));
+    if (copied) {
+      console.log("");
+      info("该命令已复制到剪贴板");
+    } else {
+      console.log("");
+      warn("剪贴板写入失败，请手动复制上面这条命令");
+    }
+  } else {
+    console.log(DIM("  网络命令不可用，请直接复制上方「配置信息」。"));
+    if (copied) console.log("");
+    if (!flags.noClipboard) {
+      if (copied) info("完整本地配置已复制到剪贴板");
+      else warn("剪贴板写入失败，请手动复制上方内容");
+    }
+  }
+
+  // ── 4. Agent 优化 ─────────────────────────────────────────────────────────
+  section("4. Agent 优化（可直接粘贴给 AI）");
+  console.log(agentPrompt);
   console.log("");
   console.log(DIM("─".repeat(60)));
   console.log(DIM("  本程序未修改你本机的任何 git 配置"));

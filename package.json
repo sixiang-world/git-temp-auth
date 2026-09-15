@@ -8,9 +8,11 @@
     "app:check": "bun gh-app-token.ts --check",
     "app:json": "bun gh-app-token.ts --json",
     "app:no-clipboard": "bun gh-app-token.ts --no-clipboard",
+    "app:no-net": "bun gh-app-token.ts --no-net",
 
     "build": "bun build ./gh-app-token.ts --compile --outfile dist/gh-app-token.exe",
     "build:min": "bun build ./gh-app-token.ts --compile --minify --outfile dist/gh-app-token.exe",
+    "deploy": "bun build ./gh-app-token.ts --compile --outfile dist-app/gh-app-token.exe && cp .env dist-app/.env && cp app-private-key.pem dist-app/app-private-key.pem",
 
     "typecheck": "tsc --noEmit --strict --skipLibCheck --types node gh-app-token.ts"
   },
