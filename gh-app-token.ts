@@ -89,6 +89,32 @@ function section(t: string) {
   console.log(DIM("─".repeat(60)));
 }
 
+// ── 错误处理 ─────────────────────────────────────────────────────────────────
+class AppError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+    public readonly hints: string[] = [],
+  ) {
+    super(message);
+    this.name = "AppError";
+  }
+}
+
+function formatAppError(e: AppError): string {
+  const lines = [`${RED("[ERROR]")} ${e.message}`];
+  for (const h of e.hints) lines.push(`${YELLOW("[HINT]")}  ${h}`);
+  return lines.join("\n");
+}
+
+// ── TextDB 重试 ──────────────────────────────────────────────────────────────
+const NET_MAX_RETRIES = 2;
+const NET_RETRY_DELAY_MS = 300;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 // ── .env ─────────────────────────────────────────────────────────────────────
 function parseEnvFile(file: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -337,27 +363,35 @@ async function fetchInstallationToken(
   }
 
   if (!res.ok) {
-    error(`申请令牌失败 (HTTP ${res.status})`);
-    console.error(data ? JSON.stringify(data, null, 2) : raw);
     const msg = String(data?.message ?? "").toLowerCase();
+    const hints: string[] = [];
 
     if (msg.includes("could not be decoded")) {
-      warn("JWT 无法被 GitHub 验证。请检查：");
-      warn("  1. APP_ID 是否正确（必须是数字 App ID，不是 Client ID）");
-      warn("     —— 注意：如果 App ID 不存在，GitHub 也会报这个错");
-      warn("  2. 私钥是否与这个 App 匹配");
-      warn("  3. 本机时间是否准确（偏差过大会导致 JWT 失效）");
+      hints.push(
+        "APP_ID 是否正确（必须是数字 App ID，不是 Client ID）",
+        "私钥是否与这个 App 匹配",
+        "本机时间是否准确（偏差过大会导致 JWT 失效）",
+      );
     } else if (res.status === 404) {
-      warn("Installation 不存在。请检查 INSTALLATION_ID 是否正确，");
-      warn("以及这个 App 是否真的安装到了目标账号/仓库上。");
+      hints.push(
+        "INSTALLATION_ID 是否正确",
+        "App 是否真的安装到了目标账号/仓库上",
+      );
     } else if (res.status === 422 || msg.includes("not accessible")) {
-      warn("TARGET_REPOS 里有仓库不在这个 App 的安装范围内。");
-      warn("请到 GitHub App 设置页把它加入安装范围，或把该仓库从 TARGET_REPOS 移除。");
-      warn("（本工具已自动去掉 owner/ 前缀；若你填的是 owner/repo，这不是原因）");
+      hints.push(
+        "TARGET_REPOS 里有仓库不在这个 App 的安装范围内",
+        "请到 GitHub App 设置页把它加入安装范围，或把该仓库从 TARGET_REPOS 移除",
+        "（本工具已自动去掉 owner/ 前缀；若你填的是 owner/repo，这不是原因）",
+      );
     } else if (msg.includes("expired")) {
-      warn("JWT 已过期，请检查本机系统时间");
+      hints.push("JWT 已过期，请检查本机系统时间");
     }
-    process.exit(1);
+
+    throw new AppError(
+      `申请令牌失败 (HTTP ${res.status}): ${data?.message || raw.slice(0, 200)}`,
+      "GITHUB_API_ERROR",
+      hints,
+    );
   }
 
   return {
@@ -575,47 +609,58 @@ async function publishToNet(
 
   const body: Record<string, string> = { key, value };
   if (net.password) body.password = net.password;
+  const bodyStr = JSON.stringify(body);
 
-  try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "gh-app-token",
-      },
-      body: JSON.stringify(body),
-    });
+  let lastError = "";
 
-    const raw = await res.text();
-    let data: any = null;
+  for (let attempt = 0; attempt <= NET_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = NET_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+      warn(`第 ${attempt} 次重试，等待 ${delay}ms...`);
+      await sleep(delay);
+    }
+
     try {
-      data = raw ? JSON.parse(raw) : null;
-    } catch {
-      /* 非 JSON 响应，下面按失败处理并回显原文 */
-    }
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "gh-app-token",
+        },
+        body: bodyStr,
+        signal: AbortSignal.timeout(15_000),
+      });
 
-    if (!res.ok || !data || data.status !== 1) {
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        /* 非 JSON 响应，下面按失败处理并回显原文 */
+      }
+
+      if (!res.ok || !data || data.status !== 1) {
+        lastError = data?.error || `HTTP ${res.status}: ${raw.slice(0, 200)}`;
+        continue; // 可重试的服务端错误
+      }
+
       return {
-        ok: false,
-        key,
-        url: "",
-        error: data?.error || `HTTP ${res.status}: ${raw.slice(0, 200)}`,
+        ok: true,
+        key: data?.data?.key || key,
+        url: data?.data?.url || `${net.baseUrl}/${key}`,
       };
+    } catch (e: any) {
+      lastError = e?.message ?? String(e);
+      // 网络错误，重试
     }
-
-    return {
-      ok: true,
-      key: data?.data?.key || key,
-      url: data?.data?.url || `${net.baseUrl}/${key}`,
-    };
-  } catch (e: any) {
-    return {
-      ok: false,
-      key,
-      url: "",
-      error: e?.message ?? String(e),
-    };
   }
+
+  return {
+    ok: false,
+    key,
+    url: "",
+    error: `${lastError} (已重试 ${NET_MAX_RETRIES} 次)`,
+  };
 }
 
 /**
@@ -878,19 +923,19 @@ async function main() {
   ].filter(Boolean) as string[];
 
   if (missing.length) {
-    section("配置不完整");
-    error(`缺少: ${missing.join(", ")}`);
-    console.log(`  请编辑: ${ENV_FILE}`);
-    pauseIfNeeded();
-    process.exit(1);
+    throw new AppError(
+      `缺少配置: ${missing.join(", ")}`,
+      "CONFIG_MISSING",
+      [`请编辑: ${ENV_FILE}`],
+    );
   }
 
   if (!existsSync(cfg.privateKeyPath)) {
-    section("私钥文件不存在");
-    error(`找不到: ${cfg.privateKeyPath}`);
-    console.log("请把从 GitHub App 页面下载的 .pem 文件放到该路径。");
-    pauseIfNeeded();
-    process.exit(1);
+    throw new AppError(
+      `私钥文件不存在: ${cfg.privateKeyPath}`,
+      "PRIVATE_KEY_NOT_FOUND",
+      ["请把从 GitHub App 页面下载的 .pem 文件放到该路径"],
+    );
   }
 
   // 读取私钥（兼容 PKCS#1 与 PKCS#8）
@@ -898,19 +943,19 @@ async function main() {
   try {
     privateKeyPem = readFileSync(cfg.privateKeyPath, "utf8");
   } catch (e: any) {
-    section("私钥读取失败");
-    error(e?.message ?? String(e));
-    pauseIfNeeded();
-    process.exit(1);
+    throw new AppError(
+      `私钥读取失败: ${e?.message ?? String(e)}`,
+      "PRIVATE_KEY_READ_ERROR",
+    );
   }
 
   // 本地自检
   if (!selfCheckKey(privateKeyPem)) {
-    section("私钥无效");
-    error("无法用该私钥完成 RSA 签名自检");
-    console.log("请确认文件是 GitHub App 下载的 PEM 私钥（BEGIN RSA PRIVATE KEY / BEGIN PRIVATE KEY）");
-    pauseIfNeeded();
-    process.exit(1);
+    throw new AppError(
+      "无法用该私钥完成 RSA 签名自检",
+      "PRIVATE_KEY_INVALID",
+      ["请确认文件是 GitHub App 下载的 PEM 私钥（BEGIN RSA PRIVATE KEY / BEGIN PRIVATE KEY）"],
+    );
   }
   info("私钥自检通过 ✓");
 
@@ -1098,7 +1143,11 @@ async function main() {
 }
 
 main().catch((e) => {
-  error(e?.stack ?? String(e));
+  if (e instanceof AppError) {
+    console.error(formatAppError(e));
+  } else {
+    error(e?.stack ?? String(e));
+  }
   pauseIfNeeded();
   process.exit(1);
 });

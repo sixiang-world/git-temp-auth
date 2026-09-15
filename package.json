@@ -1,6 +1,6 @@
 {
   "name": "git-temp-auth",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "GitHub App 短期凭证签发工具 —— 换取 1 小时有效的安装访问令牌（Bun / Windows 版）",
   "type": "module",
   "scripts": {
