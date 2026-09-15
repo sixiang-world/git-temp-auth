@@ -183,7 +183,7 @@ bun run app
 或编译成 exe 双击运行：
 
 ```bash
-bun run build:app     # 产出 dist/gh-app-token.exe
+bun run build     # 产出 dist/gh-app-token.exe
 ```
 
 ---
@@ -440,6 +440,7 @@ curl -u "x-access-token:$TOKEN" "https://github.com/owner/repo.git/info/refs?ser
 3. 生成后手动复制 token
 
 本仓库的 `git-temp-token.ts` 提供了「粘贴 token → 输出格式化配置信息」的辅助（双击 exe、自动进剪贴板），但**它原先依赖的自动创建 API 不存在**，现在只能作为格式化工具使用。
+该文件已移入 `_archive/`（见第十一节）。
 
 **方案 C：GitHub Actions**
 
@@ -452,17 +453,23 @@ curl -u "x-access-token:$TOKEN" "https://github.com/owner/repo.git/info/refs?ser
 ```
 git-temp-auth/
 ├── gh-app-token.ts              # 本工具（GitHub App 方案，推荐）
+├── README-gh-app.md             # 本文档
 ├── app-private-key.pem          # App 私钥（极度敏感，已 gitignore）
 ├── .env                         # 配置（含敏感信息，已 gitignore）
-├── git-temp-auth.ts             # 旧方案：自动配置本机 git（依赖的 /user/tokens 端点不存在）
-├── git-temp-token.ts            # 旧方案：纯生成器（同上，自动创建部分不可用）
-├── git-temp-auth.sh             # 旧方案：Shell 版（同上）
-└── dist/
-    ├── gh-app-token.exe         # 编译产物（本工具）
-    └── git-temp-token.exe       # 编译产物（旧方案）
+├── package.json                 # 脚本入口（仅保留 gh-app-token 相关）
+├── dist/
+│   └── gh-app-token.exe         # 编译产物（本工具）
+├── dist-app/                    # 可直接双击运行的部署目录（exe + .env + .pem）
+└── _archive/                    # 废弃方案归档（仅作技术记录，已 gitignore）
+    ├── git-temp-auth.ts         # 旧方案：自动配置本机 git
+    ├── git-temp-token.ts        # 旧方案：纯生成器
+    ├── git-temp-auth.sh         # 旧方案：Shell 版
+    ├── README.md                # 旧方案文档（「母 token 派生子 token」架构不成立）
+    ├── README-generator.md      # 旧 generator 文档
+    └── git-temp-token.exe       # 旧方案编译产物
 ```
 
-> ⚠️ 注意：`git-temp-auth.ts` / `git-temp-token.ts` / `git-temp-auth.sh` 都依赖
+> ⚠️ 注意：`_archive/` 中的 `git-temp-auth.ts` / `git-temp-token.ts` / `git-temp-auth.sh` 都依赖
 > `POST /user/tokens` 这个**不存在的端点**。它们的「自动创建 token」功能无法工作，
 > 只有 UI、打包、剪贴板等外围部分是好的。**请使用 `gh-app-token.ts`。**
 
@@ -472,7 +479,7 @@ git-temp-auth/
 
 ```bash
 bun install
-bun run build:app     # 产出 dist/gh-app-token.exe
+bun run build     # 产出 dist/gh-app-token.exe
 bun run typecheck     # 类型检查
 ```
 

@@ -1,27 +1,18 @@
 {
   "name": "git-temp-auth",
   "version": "1.0.0",
-  "description": "临时 GitHub 身份配置工具 —— 自动创建短期 token、输出可复制的配置信息（Bun / Windows 版）",
+  "description": "GitHub App 短期凭证签发工具 —— 换取 1 小时有效的安装访问令牌（Bun / Windows 版）",
   "type": "module",
   "scripts": {
-    "start": "bun git-temp-auth.ts",
-    "init": "bun git-temp-auth.ts init",
-    "status": "bun git-temp-auth.ts status",
-    "revoke": "bun git-temp-auth.ts revoke",
-    "usage": "bun git-temp-auth.ts help",
-
-    "gen": "bun git-temp-token.ts",
-    "gen:json": "bun git-temp-token.ts --json",
-
     "app": "bun gh-app-token.ts",
     "app:check": "bun gh-app-token.ts --check",
     "app:json": "bun gh-app-token.ts --json",
-    "build:app": "bun build ./gh-app-token.ts --compile --outfile dist/gh-app-token.exe",
+    "app:no-clipboard": "bun gh-app-token.ts --no-clipboard",
 
-    "build": "bun build ./git-temp-token.ts --compile --outfile dist/git-temp-token.exe",
-    "build:min": "bun build ./git-temp-token.ts --compile --minify --outfile dist/git-temp-token.exe",
+    "build": "bun build ./gh-app-token.ts --compile --outfile dist/gh-app-token.exe",
+    "build:min": "bun build ./gh-app-token.ts --compile --minify --outfile dist/gh-app-token.exe",
 
-    "typecheck": "tsc --noEmit --strict --skipLibCheck --types node git-temp-auth.ts git-temp-token.ts gh-app-token.ts"
+    "typecheck": "tsc --noEmit --strict --skipLibCheck --types node gh-app-token.ts"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",
