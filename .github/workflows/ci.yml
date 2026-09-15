@@ -35,7 +35,11 @@ jobs:
           file dist/gh-app-token.exe
 
       - name: Self-check (--help)
-        run: dist/gh-app-token.exe --help || true
+        run: dist/gh-app-token.exe --help
 
       - name: Self-check (--version)
-        run: dist/gh-app-token.exe --version
+        run: |
+          actual="$(dist/gh-app-token.exe --version)"
+          expected="$(node -p "require('./package.json').version")"
+          echo "binary=${actual} package=${expected}"
+          [ "$actual" = "$expected" ] || { echo "::error::--version 与 package.json 版本不一致"; exit 1; }

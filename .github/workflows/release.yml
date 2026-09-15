@@ -10,16 +10,19 @@ permissions:
 
 jobs:
   build:
-    name: Build
+    name: Build (${{ matrix.os }})
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: gh-app-token-linux
+            artifact: gh-app-token-linux.tar.gz
+            asset: gh-app-token-linux.tar.gz
           - os: macos-latest
-            artifact: gh-app-token-macos
+            artifact: gh-app-token-macos.tar.gz
+            asset: gh-app-token-macos.tar.gz
           - os: windows-latest
-            artifact: gh-app-token-windows
+            artifact: gh-app-token-windows.exe
+            asset: gh-app-token-windows.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,17 +35,53 @@ jobs:
       - run: bun run typecheck
       - run: bun run build
 
+      - name: Verify binary version matches tag
+        shell: bash
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          actual="$(./dist/gh-app-token.exe --version)"
+          echo "tag=${expected} binary=${actual}"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::版本不一致：tag 是 ${expected}，二进制报 ${actual}。请更新 gh-app-token.ts 里的 VERSION 常量。"
+            exit 1
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-*)
+              mv dist/gh-app-token.exe dist/gh-app-token-linux
+              chmod +x dist/gh-app-token-linux
+              tar -czf gh-app-token-linux.tar.gz -C dist gh-app-token-linux
+              ;;
+            macos-*)
+              mv dist/gh-app-token.exe dist/gh-app-token-macos
+              chmod +x dist/gh-app-token-macos
+              tar -czf gh-app-token-macos.tar.gz -C dist gh-app-token-macos
+              ;;
+            windows-*)
+              mv dist/gh-app-token.exe gh-app-token-windows.exe
+              ;;
+          esac
+          ls -lh
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/gh-app-token.exe
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
 
   release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # changelog 需要完整历史和 tag 列表，必须全量 checkout
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/download-artifact@v4
         with:
@@ -51,9 +90,9 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          mv artifacts/gh-app-token-linux/gh-app-token.exe release/gh-app-token-linux
-          mv artifacts/gh-app-token-macos/gh-app-token.exe release/gh-app-token-macos
-          mv artifacts/gh-app-token-windows/gh-app-token.exe release/gh-app-token-windows.exe
+          mv artifacts/gh-app-token-linux.tar.gz/gh-app-token-linux.tar.gz release/
+          mv artifacts/gh-app-token-macos.tar.gz/gh-app-token-macos.tar.gz release/
+          mv artifacts/gh-app-token-windows.exe/gh-app-token-windows.exe release/
           ls -lh release/
 
       - name: Extract version from tag
@@ -63,9 +102,9 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          PREV_TAG=$(git tag --sort=-creatordate | head -2 | tail -1)
-          if [ "$PREV_TAG" = "$GITHUB_REF_NAME" ] || [ -z "$PREV_TAG" ]; then
-            CHANGES=$(git log --oneline --no-decorate)
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${GITHUB_REF_NAME}$" | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            CHANGES=$(git log --oneline --no-decorate ${GITHUB_REF_NAME})
           else
             CHANGES=$(git log --oneline --no-decorate ${PREV_TAG}..${GITHUB_REF_NAME})
           fi
@@ -86,12 +125,14 @@ jobs:
             ${{ steps.changelog.outputs.CHANGES }}
 
             ### Downloads
-            - **Linux**: `gh-app-token-linux`
-            - **macOS**: `gh-app-token-macos`
             - **Windows**: `gh-app-token-windows.exe`
+            - **Linux**: `gh-app-token-linux.tar.gz`
+            - **macOS**: `gh-app-token-macos.tar.gz`（解压后 `chmod +x gh-app-token-macos`）
+
+            > 凭证 1 小时强制过期。使用方式见仓库 README。
           files: |
-            release/gh-app-token-linux
-            release/gh-app-token-macos
             release/gh-app-token-windows.exe
+            release/gh-app-token-linux.tar.gz
+            release/gh-app-token-macos.tar.gz
           draft: false
           prerelease: false

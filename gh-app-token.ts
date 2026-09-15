@@ -49,6 +49,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, isAbsolute, resolve } from "node:path";
 
 const IS_COMPILED = process.argv[0] === "bun";
+const VERSION = "1.1.0";
 const APP_DIR = (() => {
   if (IS_COMPILED) return dirname(process.execPath);
   const s = process.argv[1];
@@ -857,6 +858,7 @@ ${CYAN("gh-app-token")} — GitHub App 短期凭证签发工具
   --no-clipboard    不写剪贴板
   --no-net          不发布到网络（只用本地输出）
   --check           仅校验配置（私钥、App 信息、网络设置），不申请令牌
+  --version         显示版本号
   --help            显示帮助
 
 配置文件:
@@ -893,7 +895,14 @@ async function main() {
     noNet: argv.includes("--no-net"),
     check: argv.includes("--check"),
     help: argv.includes("--help") || argv.includes("-h"),
+    version: argv.includes("--version") || argv.includes("-v"),
   };
+
+  if (flags.version) {
+    console.log(VERSION);
+    pauseIfNeeded();
+    return;
+  }
 
   if (flags.help) {
     printHelp();
@@ -1035,6 +1044,7 @@ async function main() {
     console.log(
       JSON.stringify(
         {
+          version: VERSION,
           token: iat.token,
           // 新版 ghs_ 令牌只认 Basic 认证，这里直接给出可直接用的头值
           authorization_header: `Basic ${basic}`,
