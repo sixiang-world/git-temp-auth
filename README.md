@@ -1,9 +1,11 @@
 # gh-app-token — GitHub App 短期凭证签发工具
 
+> 当前版本 **v1.1.0**（[下载](https://github.com/sixiang-world/git-temp-auth/releases) · [MCP Server 设计](docs/mcp-server-design.md)）
+
 用 GitHub App 换取 **1 小时有效**的临时访问令牌，输出**零残留**的 git 命令，
 并把凭证发布成一条**可以直接粘贴执行的网络命令**。
 
-双击即用，单文件 exe，不修改本机任何 git 配置。
+双击即用，单文件 exe（Windows / macOS / Linux），不修改本机任何 git 配置。
 
 ---
 
@@ -216,16 +218,17 @@ git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" clone https://gith
 
 ## 四、Agent 优化（第 4 块输出）
 
-一段自包含的提示词，可以直接粘贴给任何 AI Agent。它把 Agent 最容易踩的坑写死在前面：
+一段自包含的提示词（约 18 行，刻意压缩到 Agent 不容易漏读的长度），直接粘贴给任何 AI Agent。默认让 Agent 全程走网络命令取凭证，curl 取不到才向用户索要凭证内容。它把 Agent 最容易踩的坑写死在前面：
 
-1. **必须用 Basic，不能用 Bearer** —— 附上正确/错误对照
-2. **`-c` 必须在子命令之前** —— 附上会落盘的反例
-3. **不要改全局 git 配置** —— 不要 `git config --global`，不要写 remote URL
+1. **必须用 Basic，不能用 Bearer** —— Bearer 会 401
+2. **`-c` 必须在子命令之前** —— 放后面令牌会落盘 `.git/config`
+3. **不要改全局 git 配置** —— 不用 `git config --global`，不用 token 内嵌 remote URL 写法
 4. **不要打印或提交令牌**
 5. **有效期 1 小时**，401 就是过期了，让用户重新生成而不是重试
 6. 附上本次的仓库范围、过期时间、可直接复制的操作模板
 
-这段提示词随每次运行动态生成，过时间和仓库范围都是当次的真实值。
+这段提示词随每次运行动态生成，过期时间和仓库范围都是当次的真实值。
+后续的 MCP Server 模式（见 `docs/mcp-server-design.md`）会用结构化工具调用取代这段粘贴文本，两者并存。
 
 ---
 
@@ -397,6 +400,7 @@ gh-app-token.exe --check        # 仅校验配置，不申请
 gh-app-token.exe --json         # JSON 输出（stdout 纯 JSON，进度信息走 stderr）
 gh-app-token.exe --no-clipboard # 不写剪贴板
 gh-app-token.exe --no-net       # 不发布到网络，只用本地输出
+gh-app-token.exe --version      # 显示版本号（--version/-v）
 gh-app-token.exe --help         # 帮助
 ```
 
@@ -404,6 +408,7 @@ gh-app-token.exe --help         # 帮助
 
 ```json
 {
+  "version": "1.1.0",
   "token": "ghs_4951418_eyJ...",
   "authorization_header": "Basic eC1hY2Nlc3MtdG9rZW46Z2hz...",
   "expires_at": "2026-09-15T12:50:04Z",
@@ -681,7 +686,7 @@ curl -u "x-access-token:$TOKEN" "https://github.com/owner/repo.git/info/refs?ser
 3. 生成后手动复制 token
 
 本仓库的 `git-temp-token.ts` 提供了「粘贴 token → 输出格式化配置信息」的辅助（双击 exe、自动进剪贴板），但**它原先依赖的自动创建 API 不存在**，现在只能作为格式化工具使用。
-该文件已移入 `_archive/`（见第十一节）。
+该文件已移入 `_archive/`（见第十三节「相关文件」）。
 
 **方案 C：GitHub Actions**
 
@@ -694,7 +699,13 @@ curl -u "x-access-token:$TOKEN" "https://github.com/owner/repo.git/info/refs?ser
 ```
 git-temp-auth/
 ├── gh-app-token.ts              # 本工具（GitHub App 方案，推荐）
-├── README-gh-app.md             # 本文档
+├── README.md                    # 本文档
+├── docs/
+│   └── mcp-server-design.md     # MCP Server 设计考虑（v1.2.0 规划）
+├── .github/
+│   └── workflows/
+│       ├── ci.yml               # push/PR 自动 typecheck + build + 自检
+│       └── release.yml          # 打 v* tag 自动三平台构建并发 GitHub Release
 ├── app-private-key.pem          # App 私钥（极度敏感，已 gitignore）
 ├── .env                         # 配置（含敏感信息，已 gitignore）
 ├── package.json                 # 脚本入口（仅保留 gh-app-token 相关）
@@ -716,7 +727,7 @@ git-temp-auth/
 
 ---
 
-## 十四、重新编译
+## 十四、重新编译与发布
 
 ```bash
 bun install
@@ -725,5 +736,22 @@ bun run typecheck     # 类型检查
 ```
 
 exe 放到任意目录，把 `.env` 和 `.pem` 一起带过去，双击即可运行。
+
+### 自动发布（GitHub Actions）
+
+发布是全自动的，只需两步：
+
+```bash
+# 1. 把 gh-app-token.ts 里的 VERSION 常量和 package.json 的 version 改成新版本号
+# 2. 打 tag 推送
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+之后 Actions 会自动：三平台（Windows/macOS/Linux）构建 → 校验 tag 与二进制 `--version` 一致 →
+打 tar.gz（Unix）/ exe（Windows）→ 生成 changelog → 发布 GitHub Release。
+CI 则在每次 push/PR 时自动跑 typecheck、构建和 `--help`/`--version` 自检。
+
+各版本二进制可在 [Releases 页面](https://github.com/sixiang-world/git-temp-auth/releases) 下载。
 
 ---
