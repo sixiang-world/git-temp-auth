@@ -1,15 +1,41 @@
 # git-temp-auth — 临时 GitHub 身份配置工具
 
+> ## ⚠️ 重要更正（2026-09-15）
+>
+> **本仓库中 `git-temp-auth.ts` / `git-temp-token.ts` / `git-temp-auth.sh` 的「自动创建 token」
+> 功能无法工作** —— 它们依赖的 `POST /user/tokens` 端点**在 GitHub 上不存在**（实测返回 404，
+> 也不在官方 OpenAPI 规范中）。
+>
+> **请使用新版本 [`gh-app-token.ts`](./README-gh-app.md)**，它基于 GitHub App 方案，
+> 已逐条实测验证可用。
+>
+> ```bash
+> bun run build:app     # 产出 dist/gh-app-token.exe
+> ```
+>
+> 详见 **[README-gh-app.md](./README-gh-app.md)**。
+
 运行一个脚本，自动配置好 GitHub token / username / email，到期自动撤销，再也不用手动管理 token。
 
-提供两个版本：
+~~提供两个版本：~~
 
-| 版本 | 文件 | 依赖 | 适用 |
-|------|------|------|------|
-| **Bun 版（推荐）** | `git-temp-auth.ts` | bun 1.x + git | Windows / macOS / Linux |
-| Shell 版 | `git-temp-auth.sh` | bash + curl + jq + git | Linux / macOS / Git Bash |
+| 版本 | 文件 | 状态 |
+|------|------|------|
+| **GitHub App 版（推荐）** | `gh-app-token.ts` | ✅ 可用，见 [README-gh-app.md](./README-gh-app.md) |
+| Bun 版 | `git-temp-auth.ts` | ⚠️ 自动创建 token 不可用（端点不存在） |
+| Shell 版 | `git-temp-auth.sh` | ⚠️ 同上 |
+| 纯生成器 | `git-temp-token.ts` | ⚠️ 同上 |
 
-Bun 版针对 Windows 做了专门优化：无需 jq/curl、自动读取 `.env`、输出可直接粘贴的 PowerShell 命令并自动复制到剪贴板。
+## 只想要 token、不想动本机环境？
+
+用 `gh-app-token.ts`：换取 1 小时有效的临时令牌，输出**零残留**的 git 命令，
+**完全不碰你本机的 git 配置**。
+
+```bash
+bun run build:app     # 产出 dist/gh-app-token.exe
+```
+
+详见 **[README-gh-app.md](./README-gh-app.md)**。
 
 ## 解决什么问题
 

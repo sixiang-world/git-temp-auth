@@ -4,3 +4,11 @@ node_modules/
 .env
 .state
 .expire.log
+
+# GitHub App 私钥（极度敏感，绝不能提交）
+*.pem
+app-private-key.pem
+
+# 编译产物 / 可直接双击运行的部署目录（含 .env 与私钥）
+dist/
+dist-app/
