@@ -1,0 +1,6 @@
+node_modules/
+
+# git-temp-auth 运行时文件（含敏感信息，切勿提交）
+.env
+.state
+.expire.log

@@ -1,0 +1,18 @@
+{
+  "name": "git-temp-auth",
+  "version": "1.0.0",
+  "description": "临时 GitHub 身份配置工具 —— 自动创建短期 token、配置 git，到期自动撤销（Bun / Windows 版）",
+  "type": "module",
+  "scripts": {
+    "start": "bun git-temp-auth.ts",
+    "init": "bun git-temp-auth.ts init",
+    "status": "bun git-temp-auth.ts status",
+    "revoke": "bun git-temp-auth.ts revoke",
+    "usage": "bun git-temp-auth.ts help",
+    "typecheck": "tsc --noEmit --strict --skipLibCheck --types node git-temp-auth.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "typescript": "^7.0.2"
+  }
+}
