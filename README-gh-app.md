@@ -22,7 +22,7 @@
 现在只需要一条命令：
 
 ```bash
-curl -s https://text.hunluan.space/ghtoken_20260915195004_frklun | bash
+curl -s https://text.hunluan.space/ghtoken_<timestamp>_<random> | bash
 ```
 
 这条命令在任何能上网的机器上执行，都会：
@@ -143,7 +143,7 @@ git clone -c http.extraHeader=... <url>   # ❌ 被当作 clone 的选项，写�
 B 机器只需要知道这个地址：
 
 ```bash
-curl -s https://text.hunluan.space/ghtoken_20260915195004_frklun | bash
+curl -s https://text.hunluan.space/ghtoken_<timestamp>_<random> | bash
 ```
 
 一条命令，自包含，可直接粘贴。
@@ -417,9 +417,9 @@ gh-app-token.exe --help         # 帮助
   "bot_email": "329479613+gen-temp-token[bot]@users.noreply.github.com",
   "network": {
     "ok": true,
-    "key": "ghtoken_20260915195004_frklun",
-    "url": "https://text.hunluan.space/ghtoken_20260915195004_frklun",
-    "command": "curl -s https://text.hunluan.space/ghtoken_20260915195004_frklun | bash",
+    "key": "ghtoken_<timestamp>_<random>",
+    "url": "https://text.hunluan.space/ghtoken_<timestamp>_<random>",
+    "command": "curl -s https://text.hunluan.space/ghtoken_<timestamp>_<random> | bash",
     "error": null
   },
   "agent_prompt": "你是执行 GitHub 操作的助手。..."
