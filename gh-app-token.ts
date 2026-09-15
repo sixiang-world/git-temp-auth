@@ -734,6 +734,7 @@ function buildNetScript(args: {
  *
  * 目标是让 Agent 读完就能自己完成「取凭证 → 用凭证」的全过程，
  * 不需要人去解释 Basic/Bearer 的区别或 -c 的位置坑。
+ * 刻意保持简短 —— 越短的提示词，Agent 越不容易漏读关键约束。
  */
 function buildAgentPrompt(args: {
   netUrl: string;
@@ -744,89 +745,30 @@ function buildAgentPrompt(args: {
 }): string {
   const { netUrl, expiresAt, appSlug, botId, repos } = args;
   const firstRepo = repos.length ? repos[0] : "<owner>/<repo>";
+  const repoScope = repos.length ? repos.join(", ") : "安装范围内全部仓库";
   const botName = appSlug ? `${appSlug}[bot]` : "";
+  const botEmail = appSlug && botId ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : "";
 
   const L: string[] = [];
-  L.push("你是执行 GitHub 操作的助手。按以下步骤获取临时凭证并完成 git 操作。");
+  L.push("你是执行 GitHub 操作的助手。默认全程用网络命令，先取凭证再执行 git 操作。");
   L.push("");
-  L.push("## 凭证来源");
+  L.push(`1. 取凭证：export GH_TEMP_TOKEN=$(curl -s ${netUrl} | grep -oP '(?<=GH_TEMP_TOKEN=")[^"]+')`);
+  L.push("   curl 失败则向用户索要凭证内容（GH_TEMP_TOKEN 是已 base64 的 Basic 认证值）。");
   L.push("");
-  L.push("执行这条命令取回凭证（它是 base64 后的 Basic 认证值）：");
+  L.push("2. 硬约束（违反必失败）：");
+  L.push('   - 只用 Basic：git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" <git 子命令>');
+  L.push("   - -c 必须写在子命令（clone/pull/push）之前，放后面令牌会落盘 .git/config");
+  L.push("   - 不改全局 git 配置、不用 https://x-access-token:TOKEN@ 内嵌 URL、不打印或提交令牌");
   L.push("");
-  L.push("```bash");
-  L.push(`export GH_TEMP_TOKEN=$(curl -s ${netUrl} | grep -oP '(?<=GH_TEMP_TOKEN=")[^"]+')`);
-  L.push("```");
+  L.push(`3. 范围与寿命：仅限仓库 ${repoScope}；有效期 1 小时，本次到期 ${expiresAt}（本地 ${formatLocal(expiresAt)}）。`);
+  L.push("   401 即过期，让用户重新运行 gh-app-token 生成，不要重试。");
   L.push("");
-  L.push("如果上面取不到，直接拉全文自行解析：");
-  L.push("");
-  L.push("```bash");
-  L.push(`curl -s ${netUrl}`);
-  L.push("```");
-  L.push("");
-  L.push("## 硬约束（非常重要，违反会失败）");
-  L.push("");
-  L.push("1. **必须用 Basic，不能用 Bearer。** 新版 `ghs_` 令牌只接受 HTTP Basic 认证，");
-  L.push("   用 `Authorization: Bearer <token>` 会返回 401 或提示输入用户名。");
-  L.push("   正确写法：`Authorization: Basic $GH_TEMP_TOKEN`");
-  L.push("");
-  L.push("2. **`-c` 必须放在子命令之前。** 位置错了令牌会落盘到 `.git/config`，属于安全事故：");
-  L.push("");
-  L.push("   ```bash");
-  L.push("   git -c http.extraHeader=... clone <url>   # ✅ 仅本次命令生效");
-  L.push("   git clone -c http.extraHeader=... <url>   # ❌ 令牌写进 .git/config");
-  L.push("   ```");
-  L.push("");
-  L.push("3. **不要改本机的全局 git 配置。** 不要执行 `git config --global`，");
-  L.push("   不要设置 credential.helper，不要用 `https://x-access-token:TOKEN@github.com/...`");
-  L.push("   这种把令牌写进 remote URL 的写法。用完即弃。");
-  L.push("");
-  L.push("4. **不要打印或提交令牌。** 不要把 `$GH_TEMP_TOKEN` 或 `ghs_` 开头的原文");
-  L.push("   写进任何文件、日志、commit、issue 或 PR 描述。");
-  L.push("");
-  L.push("## 凭证寿命");
-  L.push("");
-  L.push("- 有效期 **1 小时**，由 GitHub 服务端强制过期，无法延长。");
-  L.push(`- 本次过期时间：${expiresAt}（本地 ${formatLocal(expiresAt)}）`);
-  L.push("- 如果返回 401，说明已过期 —— 让用户重新运行 `gh-app-token` 生成，不要重试。");
-  L.push("");
-  L.push("## 可用范围");
-  L.push("");
-  if (repos.length) {
-    L.push(`仅限这些仓库：${repos.join(", ")}`);
-  } else {
-    L.push("安装范围内全部仓库（未在配置里限定）。");
-  }
-  L.push(`典型仓库：${firstRepo}`);
-  L.push("");
-  L.push("## 操作模板");
-  L.push("");
-  L.push("```bash");
-  L.push(`git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" clone https://github.com/${firstRepo}.git`);
-  L.push("```");
-  L.push("");
-  L.push("在已有仓库里执行 pull / push / status 等，同样把 `-c` 放在子命令前：");
-  L.push("");
-  L.push("```bash");
-  L.push('git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" pull');
-  L.push('git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" push');
-  L.push("```");
-  L.push("");
+  L.push(`4. 示例：git -c http.extraHeader="Authorization: Basic $GH_TEMP_TOKEN" clone https://github.com/${firstRepo}.git`);
   if (botName) {
-    L.push("## 提交身份");
-    L.push("");
-    L.push("若希望提交显示为 App 机器人而非用户本人，加上：");
-    L.push("");
-    L.push("```bash");
-    L.push(`-c user.name="${botName}" \\`);
-    L.push("  " + `-c user.email="${botId}+${appSlug}[bot]@users.noreply.github.com"`);
-    L.push("```");
-    L.push("");
+    L.push(`   提交身份（可选）：-c user.name="${botName}" -c user.email="${botEmail}"`);
   }
-  L.push("## 完成后");
   L.push("");
-  L.push("```bash");
-  L.push("unset GH_TEMP_TOKEN");
-  L.push("```");
+  L.push("完成后 unset GH_TEMP_TOKEN。");
   return L.join("\n");
 }
 
